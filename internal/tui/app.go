@@ -11,28 +11,22 @@ import (
 	"github.com/simdangelo/fingo/internal/tui/styles"
 )
 
-// Model is the root Bubble Tea model.
 type Model struct {
 	width      int
 	height     int
 	activePage components.Page
-
-	// Page models — one per top-level section.
-	txPage transactions.Model
+	txPage     transactions.Model
 }
 
-// New creates the root model and injects all services.
-func New(txService *app.TransactionService) Model {
+func New(txService *app.TransactionService, catService *app.CategoryService) Model {
 	return Model{
 		activePage: components.PageDashboard,
-		txPage:     transactions.New(txService),
+		txPage:     transactions.New(txService, catService),
 	}
 }
 
 func (m Model) Init() tea.Cmd {
-	return tea.Batch(
-		m.txPage.Init(),
-	)
+	return tea.Batch(m.txPage.Init())
 }
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -48,14 +42,24 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmds = append(cmds, c)
 
 	case tea.KeyMsg:
-		if msg.String() == "q" || msg.String() == "ctrl+c" {
+		// Always allow quitting, even from inside a form.
+		if msg.String() == "ctrl+c" {
 			return m, tea.Quit
 		}
 
-		// Number keys always navigate top-level sections.
-		// Sub-tab switching within a page uses ←/→ arrows instead,
-		// so there is no conflict.
+		// If the active page is capturing input (e.g. a form is open),
+		// forward ALL keys to it — do not intercept anything for navigation.
+		if m.activePage == components.PageTransactions && m.txPage.IsCapturingInput() {
+			var c tea.Cmd
+			m.txPage, c = m.txPage.Update(msg)
+			cmds = append(cmds, c)
+			break
+		}
+
+		// Normal navigation — no form is open.
 		switch msg.String() {
+		case "q":
+			return m, tea.Quit
 		case "1":
 			m.activePage = components.PageDashboard
 		case "2":
@@ -77,7 +81,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "shift+tab":
 			m.activePage = (m.activePage + 7) % 8
 		default:
-			// Forward everything else to the active page.
 			switch m.activePage {
 			case components.PageTransactions:
 				var c tea.Cmd
@@ -87,7 +90,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	default:
-		// Forward non-key messages (e.g. txLoadedMsg) to all page models.
+		// Non-key messages (loaded data, etc.) always forwarded.
 		var c tea.Cmd
 		m.txPage, c = m.txPage.Update(msg)
 		cmds = append(cmds, c)
@@ -110,10 +113,8 @@ func (m Model) View() string {
 		contentHeight = 1
 	}
 
-	var (
-		content      string
-		pageBindings []components.Binding
-	)
+	var content string
+	var pageBindings []components.Binding
 
 	switch m.activePage {
 	case components.PageTransactions:
@@ -128,8 +129,8 @@ func (m Model) View() string {
 			PaddingTop(1).
 			Render(placeholder)
 		pageBindings = []components.Binding{
-			{"1-3", "Navigate"},
-			{"tab", "Switch Page"},
+			{"1-8", "Navigate"},
+			{"tab", "Cycle"},
 		}
 	}
 

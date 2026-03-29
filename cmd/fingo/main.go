@@ -2,11 +2,12 @@ package main
 
 import (
 	"fmt"
+	"log"
 	"os"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/simdangelo/fingo/internal/app"
-	"github.com/simdangelo/fingo/internal/memory"
+	"github.com/simdangelo/fingo/internal/sqlite"
 	"github.com/simdangelo/fingo/internal/tui"
 
 	// Replace these with your real repository implementations.
@@ -16,12 +17,27 @@ import (
 
 func main() {
 	// Wire up services.
-	txRepo := memory.NewTransactionRepository()
-	catRepo := memory.NewCategoryRepository()
-	txService := app.NewTransactionService(txRepo, catRepo)
+	// txRepo := memory.NewTransactionRepository()
+	// catRepo := memory.NewCategoryRepository()
+	// txService := app.NewTransactionService(txRepo, catRepo)
+	// catService := app.NewCategoryService(catRepo, txRepo)
+	db, err := sqlite.InitDB("finance.db")
+    if err != nil {
+        log.Fatalf("Failed to initialize database: %v", err)
+    }
+    defer sqlite.Close(db)
+    
+    // Create repositories
+    categoryRepo := sqlite.NewCategoryRepository(db)
+    transactionRepo := sqlite.NewTransactionRepository(db)
+    
+    // Create services
+    catService := app.NewCategoryService(categoryRepo, transactionRepo)
+    txService := app.NewTransactionService(transactionRepo, categoryRepo)
+  
 
 	p := tea.NewProgram(
-		tui.New(txService),
+		tui.New(txService, catService),
 		tea.WithAltScreen(),
 		tea.WithMouseCellMotion(),
 	)

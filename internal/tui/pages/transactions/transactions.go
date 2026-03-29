@@ -31,34 +31,50 @@ type txLoadedMsg struct {
 	err          error
 }
 
+// catsLoadedMsg is sent when categories finish loading.
+type catsLoadedMsg struct {
+	categories []domain.Category
+	err        error
+}
+
 // ── Model ─────────────────────────────────────────────────────────────────────
 
 type Model struct {
-	service      *app.TransactionService
-	transactions []domain.Transaction // all loaded transactions
-	activeTab    tabFilter
-	table        table.Model
-	width        int
-	height       int
-	err          error
-	loading      bool
+	txService  *app.TransactionService
+	catService *app.CategoryService
+
+	transactions []domain.Transaction
+	categories   []domain.Category
+
+	activeTab tabFilter
+	table     table.Model
+	width     int
+	height    int
+	err       error
+	loading   bool
+
+	// Form overlay
+	showForm bool
+	form     formModel
 }
 
-func New(service *app.TransactionService) Model {
-	m := Model{
-		service: service,
-		loading: true,
+func New(txService *app.TransactionService, catService *app.CategoryService) Model {
+	return Model{
+		txService:  txService,
+		catService: catService,
+		loading:    true,
 	}
-	return m
 }
 
 // ── Init ──────────────────────────────────────────────────────────────────────
 
 func (m Model) Init() tea.Cmd {
-	return loadTransactions(m.service)
+	return tea.Batch(
+		loadTransactions(m.txService),
+		loadCategories(m.catService),
+	)
 }
 
-// loadTransactions is a Bubble Tea command: runs in a goroutine, sends a msg back.
 func loadTransactions(svc *app.TransactionService) tea.Cmd {
 	return func() tea.Msg {
 		txs, err := svc.GetAllTransactions()
@@ -66,9 +82,47 @@ func loadTransactions(svc *app.TransactionService) tea.Cmd {
 	}
 }
 
+func loadCategories(svc *app.CategoryService) tea.Cmd {
+	return func() tea.Msg {
+		cats, err := svc.ListCategories()
+		return catsLoadedMsg{categories: cats, err: err}
+	}
+}
+
 // ── Update ────────────────────────────────────────────────────────────────────
 
 func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
+	// ── Form is open: route all messages there ────────────────────────────────
+	if m.showForm {
+		switch msg := msg.(type) {
+		case tea.KeyMsg:
+			if msg.String() == "esc" {
+				m.showForm = false
+				return m, nil
+			}
+		case formSavedMsg:
+			// Transaction saved — close form and reload list
+			m.showForm = false
+			m.loading = true
+			return m, loadTransactions(m.txService)
+		case formErrMsg:
+			m.form.err = msg.err.Error()
+			m.form.submitting = false
+			return m, nil
+		case categoryCreatedMsg:
+			// Append the new category and select it
+			m.categories = append(m.categories, msg.cat)
+			m.form.categories = m.categories
+			m.form.categoryIndex = len(m.categories) - 1
+			m.form.newCatMode = false
+			return m, nil
+		}
+		var cmd tea.Cmd
+		m.form, cmd = m.form.Update(msg)
+		return m, cmd
+	}
+
+	// ── Normal table mode ─────────────────────────────────────────────────────
 	switch msg := msg.(type) {
 
 	case tea.WindowSizeMsg:
@@ -85,23 +139,31 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 		m.transactions = msg.transactions
 		m.rebuildTable()
 
+	case catsLoadedMsg:
+		if msg.err == nil {
+			m.categories = msg.categories
+		}
+
 	case tea.KeyMsg:
 		switch msg.String() {
-		case "left", "h":
+		case "n":
+			// Open the form, seeding it with the already-loaded categories
+			m.form = newForm(m.txService, m.catService, m.categories)
+			m.showForm = true
+		case "left":
 			if m.activeTab > tabAll {
 				m.activeTab--
 				m.rebuildTable()
 			}
-		case "right", "l":
+		case "right":
 			if m.activeTab < tabIncome {
 				m.activeTab++
 				m.rebuildTable()
 			}
 		case "r":
 			m.loading = true
-			return m, loadTransactions(m.service)
+			return m, loadTransactions(m.txService)
 		default:
-			// Forward all other keys to the table (↑↓ scrolling, etc.)
 			var cmd tea.Cmd
 			m.table, cmd = m.table.Update(msg)
 			return m, cmd
@@ -114,6 +176,11 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 // ── View ──────────────────────────────────────────────────────────────────────
 
 func (m Model) View() string {
+	// If form is open, render it as an overlay on top of the table
+	if m.showForm {
+		return components.RenderModal("NEW TRANSACTION", m.form.View(), m.width, m.height-4)
+	}
+
 	if m.loading {
 		return lipgloss.NewStyle().
 			Foreground(lipgloss.Color(styles.ColorMuted)).
@@ -127,34 +194,41 @@ func (m Model) View() string {
 
 	var b strings.Builder
 
-	// ── Sub-tabs: All / Expenses / Income ────────────────────────────────────
 	b.WriteString(renderTabs(m.activeTab))
 	b.WriteString("\n")
-
-	// ── Summary line ─────────────────────────────────────────────────────────
 	b.WriteString(m.renderSummary())
 	b.WriteString("\n\n")
-
-	// ── Table ─────────────────────────────────────────────────────────────────
 	b.WriteString(m.table.View())
 
 	return b.String()
 }
 
-// Bindings returns the status bar shortcuts for this page.
+// Bindings returns context-sensitive status bar shortcuts.
 func (m Model) Bindings() []components.Binding {
+	if m.showForm {
+		return []components.Binding{
+			{"tab/↑↓", "Move field"},
+			{"←→", "Toggle"},
+			{"enter", "Save"},
+			{"esc", "Cancel"},
+		}
+	}
 	return []components.Binding{
 		{"n", "New"},
-		{"d", "Delete"},
 		{"r", "Refresh"},
 		{"←→", "All/Exp/Inc"},
 		{"↑↓", "Navigate"},
 	}
 }
 
+// IsCapturingInput returns true when the page has a modal/form open
+// that needs all keystrokes, so the root model must not intercept them.
+func (m Model) IsCapturingInput() bool {
+	return m.showForm
+}
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-// filtered returns only the transactions matching the active tab.
 func (m Model) filtered() []domain.Transaction {
 	var out []domain.Transaction
 	for _, tx := range m.transactions {
@@ -174,19 +248,24 @@ func (m Model) filtered() []domain.Transaction {
 	return out
 }
 
-// rebuildTable recreates the bubbles/table with current data and dimensions.
+// categoryName resolves a category ID to its display name.
+func (m Model) categoryName(id string) string {
+	for _, c := range m.categories {
+		if c.ID == id {
+			return c.Name
+		}
+	}
+	return id // fallback to raw ID if not found
+}
+
 func (m *Model) rebuildTable() {
 	txs := m.filtered()
 
-	// Column widths that adapt to terminal width.
-	// Minimum sensible width is ~80 chars.
 	w := m.width
 	if w < 80 {
 		w = 80
 	}
-	// Fixed columns: date(14) + type(10) + amount(14) + padding ≈ 44
-	// Remainder goes to description and category, split 55/45.
-	remaining := w - 44 - 6 // 6 for table borders/padding
+	remaining := w - 44 - 6
 	descW := remaining * 55 / 100
 	catW := remaining - descW
 
@@ -203,13 +282,12 @@ func (m *Model) rebuildTable() {
 		rows[i] = table.Row{
 			tx.Date.Format("Jan 02, 2006"),
 			tx.Description,
-			tx.CategoryID, // Step 4 will resolve category names
+			m.categoryName(tx.CategoryID), // now resolves to real name
 			string(tx.Type),
 			formatAmount(tx),
 		}
 	}
 
-	// Table height: total height minus rows used by header, tabs, summary, status.
 	tableHeight := m.height - 10
 	if tableHeight < 5 {
 		tableHeight = 5
@@ -222,7 +300,6 @@ func (m *Model) rebuildTable() {
 		table.WithHeight(tableHeight),
 	)
 
-	// Apply styles
 	s := table.DefaultStyles()
 	s.Header = s.Header.
 		Background(lipgloss.Color(styles.ColorSurface)).
